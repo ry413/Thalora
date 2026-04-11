@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from typing import Any, Dict, Optional
 
-from api import consumeDeviceOwnerBalance, getDeviceOnlineStatus, getDeviceOwnerBenefit
+from api import consumeDeviceOwnerBalance, getDeviceOnlineStatus, getDeviceOwnerBenefit, getDeviceOwnerId
 from liveMan import DouyinLiveWebFetcher
 
 
@@ -178,6 +178,39 @@ class MonitorManager:
         if not isinstance(data, dict):
             return None
         return data
+
+    def _summarize_api_error(self, response: Optional[Dict[str, Any]]) -> str:
+        if not response:
+            return "empty response"
+        if response.get("status_code") is not None and response.get("text"):
+            return f"http {response.get('status_code')}: {response.get('text')}"
+        payload = response.get("data")
+        if isinstance(payload, dict):
+            code = payload.get("code")
+            msg = payload.get("msg")
+            if code is not None or msg:
+                return f"code={code}, msg={msg}"
+        return str(response)
+
+    def _extract_owner_user_id(self, response: Dict[str, Any]) -> Optional[str]:
+        if not response or not response.get("ok"):
+            return None
+        payload = response.get("data", {})
+        data = payload.get("data")
+        if isinstance(data, dict):
+            user_id = data.get("userId") or data.get("ownerUserId") or data.get("id")
+            return str(user_id).strip() if user_id else None
+        if isinstance(data, str):
+            return data.strip() or None
+        return None
+
+    def _find_active_task_by_user_id_unlocked(self, user_id: str) -> Optional[MonitorTask]:
+        for task in self._tasks.values():
+            if task.status in {"stopped", "error"}:
+                continue
+            if task.benefit_user_id == user_id:
+                return task
+        return None
 
     def _apply_benefit_payload_unlocked(self, task: MonitorTask, benefit_payload: Dict[str, Any]):
         task.benefit_user_id = benefit_payload.get("userId")
@@ -388,20 +421,35 @@ class MonitorManager:
         device_id: str,
         config_json: Optional[Dict[str, Any]] = None,
     ) -> MonitorTask:
+        initial_owner_user_id = None
+        try:
+            initial_owner_user_id = self._extract_owner_user_id(getDeviceOwnerId(device_id))
+        except Exception:
+            initial_owner_user_id = None
+
+        benefit_response = None
+        try:
+            benefit_response = getDeviceOwnerBenefit(device_id)
+            initial_benefit = self._extract_benefit_payload(benefit_response)
+        except Exception as err:
+            raise ValueError(f"failed to get device owner benefit: {err}") from err
+        if not initial_benefit:
+            raise ValueError(f"failed to get device owner benefit: {self._summarize_api_error(benefit_response)}")
+        owner_user_id = initial_owner_user_id or str(initial_benefit.get("userId") or "").strip()
+        if not owner_user_id:
+            raise ValueError("failed to get device owner id")
+        if not bool(initial_benefit.get("membershipActive")) and int(initial_benefit.get("balanceSeconds") or 0) <= 0:
+            raise ValueError("device owner benefit insufficient")
+
         with self._lock:
             existing_task = self._tasks.get(device_id)
             if existing_task and existing_task.status not in {"stopped", "error"}:
                 raise ValueError(f"device_id already has active monitor: {device_id}")
-
-        initial_benefit = None
-        try:
-            initial_benefit = self._extract_benefit_payload(getDeviceOwnerBenefit(device_id))
-        except Exception:
-            initial_benefit = None
-        if not initial_benefit:
-            raise ValueError("failed to get device owner benefit")
-        if not bool(initial_benefit.get("membershipActive")) and int(initial_benefit.get("balanceSeconds") or 0) <= 0:
-            raise ValueError("device owner benefit insufficient")
+            existing_user_task = self._find_active_task_by_user_id_unlocked(owner_user_id)
+            if existing_user_task:
+                raise ValueError(
+                    f"user_id already has active monitor: {owner_user_id}, device_id: {existing_user_task.device_id}"
+                )
 
         task = MonitorTask(
             live_id=live_id,
@@ -412,6 +460,7 @@ class MonitorManager:
         task.last_billed_at = utc_now_iso()
         task.membership_last_checked_at = utc_now_iso()
         self._apply_benefit_payload_unlocked(task, initial_benefit)
+        task.benefit_user_id = owner_user_id
         fetcher = DouyinLiveWebFetcher(
             live_id=live_id,
             device_id=device_id,

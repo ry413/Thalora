@@ -107,6 +107,26 @@ def getDeviceOwnerBenefit(deviceId: str):
             "status_code": response.status_code,
             "text": response.text,
         }
+
+
+def getDeviceOwnerId(deviceId: str):
+    url = f"{baseUrl}/device/user/{deviceId}"
+    headers = _build_headers()
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        response_json = response.json()
+        print(f"Device owner id retrieved successfully. Response: {response_json}")
+        return {
+            "ok": response_json.get("code") == 0,
+            "status_code": response.status_code,
+            "data": response_json,
+        }
+    print(f"Failed to retrieve device owner id. Status code: {response.status_code}, Response: {response.text}")
+    return {
+        "ok": False,
+        "status_code": response.status_code,
+        "text": response.text,
+    }
     
 def consumeDeviceOwnerBalance(deviceId: str, amount: int):
     url = f"{baseUrl}/activation-code/device/{deviceId}/balance/consume"
