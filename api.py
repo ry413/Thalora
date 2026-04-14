@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 import requests
@@ -32,11 +33,23 @@ def _build_headers() -> Dict[str, str]:
         "Content-Type": "application/json",
     }
 
+
+def _sanitize_prompt_text(prompt: str) -> str:
+    if not isinstance(prompt, str):
+        prompt = str(prompt)
+    prompt = prompt.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    prompt = prompt.replace("\\", " ")
+    prompt = prompt.replace('"', " ")
+    prompt = re.sub(r"[\x00-\x1f\x7f]", " ", prompt)
+    prompt = re.sub(r"\s+", " ", prompt).strip()
+    return prompt
+
 def sendPrompt(deviceId: str, prompt: str):
     # print(f"已发送prompt: {prompt} to deviceId: {deviceId}")
     # return
     url = f"{baseUrl}/device/directChat/{deviceId}"
     headers = _build_headers()
+    safe_prompt = _sanitize_prompt_text(prompt)
 
     data = {
         "type": "mcp",
@@ -47,21 +60,22 @@ def sendPrompt(deviceId: str, prompt: str):
             "params": {
                 "name": "self.direct_chat",
                 "arguments": {
-                    "message": prompt
+                    "message": safe_prompt
                 },
             },
         },
     }
     response = requests.post(url, headers=headers, json=data)
     if response.status_code == 200:
-        print(f"Prompt sent successfully. Response: {response.json()}")
+        response_json = response.json()
+        print(f"Prompt send response. deviceId={deviceId} prompt={safe_prompt} response={response_json}")
         return {
-            "ok": True,
+            "ok": response_json.get("code") == 0,
             "status_code": response.status_code,
-            "data": response.json(),
+            "data": response_json,
         }
     else:
-        print(f"Failed to send prompt. Status code: {response.status_code}, Response: {response.text}")
+        print(f"Failed to send prompt. deviceId={deviceId} prompt={safe_prompt} status_code={response.status_code}, response={response.text}")
         return {
             "ok": False,
             "status_code": response.status_code,

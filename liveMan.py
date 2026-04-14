@@ -71,6 +71,7 @@ DEFAULT_CONFIG_JSON = {
 }
 
 PROMPT_SOURCE_PRIORITY = {
+    "manual": 70,
     "timed": 60,
     "gift": 50,
     "danmu": 40,
@@ -530,6 +531,22 @@ class DouyinLiveWebFetcher:
                 "ts": time.time(),
             })
         self._try_dispatch_prompt()
+
+    def enqueue_manual_prompt(self, message):
+        if message is None:
+            return
+        message = str(message).strip()
+        if not message:
+            return
+        prompt = self._build_prompt_from_templates(
+            "manual",
+            variables={
+                "message": message,
+                "text": message,
+            },
+            fallback=message,
+        )
+        self.enqueue_prompt(prompt, source="manual")
 
     def allow_send_prompt(self):
         with self._prompt_lock:

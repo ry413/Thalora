@@ -27,7 +27,10 @@ def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC_PLUS_8)
+        return parsed.astimezone(UTC_PLUS_8)
     except ValueError:
         return None
 
@@ -558,6 +561,15 @@ class MonitorManager:
             fetcher.allow_send_prompt()
         return task
 
+    def enqueue_manual_prompt_by_device(self, device_id: str, message: str) -> Optional[MonitorTask]:
+        task = self.get_active_monitor_by_device(device_id)
+        if not task:
+            return None
+        fetcher = task.fetcher
+        if fetcher and hasattr(fetcher, "enqueue_manual_prompt"):
+            fetcher.enqueue_manual_prompt(message)
+        return task
+
     def record_sent_prompt(self, device_id: str, payload: Dict[str, Any]):
         with self._lock:
             task = self._tasks.get(device_id)
@@ -717,6 +729,32 @@ class ServiceHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if self.path.startswith("/monitors/manual/"):
+            device_id = self.path[len("/monitors/manual/"):].strip("/")
+            if not device_id:
+                self._send_json({"code": 400, "msg": "invalid device id"})
+                return
+            try:
+                payload = self._read_json()
+            except json.JSONDecodeError:
+                self._send_json({"code": 400, "msg": "invalid json"})
+                return
+            message = str(payload.get("message", payload.get("prompt", ""))).strip()
+            if not message:
+                self._send_json({"code": 400, "msg": "message is required"})
+                return
+            task = MANAGER.enqueue_manual_prompt_by_device(device_id, message)
+            if not task:
+                self._send_json({"code": 404, "msg": "no active monitor for this device_id"})
+                return
+            self._send_json({
+                "code": 0,
+                "msg": "manual prompt queued",
+                "device_id": device_id,
+                "data": task.to_dict(),
+            })
+            return
+
         if self.path != "/monitors":
             self._not_found()
             return
@@ -780,7 +818,7 @@ def run_server(host: str = "0.0.0.0", port: int = 18080):
     MANAGER.start_watchdog()
     server = ThreadingHTTPServer((host, port), ServiceHandler)
     print(f"API server listening on http://{host}:{port}")
-    print("Endpoints: GET /health, POST /monitors, GET /monitors, GET /monitors/device/{device_id}, GET /sent-prompts/device/{device_id}, DELETE /monitors/device/{device_id}, POST /monitors/allow-prompt/{device_id}")
+    print("Endpoints: GET /health, POST /monitors, GET /monitors, GET /monitors/device/{device_id}, GET /sent-prompts/device/{device_id}, DELETE /monitors/device/{device_id}, POST /monitors/allow-prompt/{device_id}, POST /monitors/manual/{device_id}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
