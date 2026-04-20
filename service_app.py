@@ -13,10 +13,12 @@ from urllib.parse import parse_qs, urlparse
 from typing import Any, Dict, Optional
 
 from api import consumeDeviceOwnerBalance, getDeviceOnlineStatus, getDeviceOwnerBenefit, getDeviceOwner
+from log_utils import get_logger
 from liveMan import DouyinLiveWebFetcher
 
 
 UTC_PLUS_8 = timezone(timedelta(hours=8))
+LOGGER = get_logger(__name__)
 
 
 def utc_now_iso() -> str:
@@ -826,19 +828,22 @@ class ServiceHandler(BaseHTTPRequestHandler):
         self._not_found()
 
     def log_message(self, format: str, *args):
-        message = "%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), format % args)
-        print(message, end="")
+        LOGGER.debug("%s - - [%s] %s", self.client_address[0], self.log_date_time_string(), format % args)
 
 
 def run_server(host: str = "0.0.0.0", port: int = 18080):
     MANAGER.start_watchdog()
     server = ThreadingHTTPServer((host, port), ServiceHandler)
-    print(f"API server listening on http://{host}:{port}")
-    print("Endpoints: GET /health, POST /monitors, GET /monitors, GET /monitors/device/{device_id}, GET /sent-prompts/device/{device_id}, DELETE /monitors/device/{device_id}, POST /monitors/allow-prompt/{device_id}, POST /monitors/manual/{device_id}")
+    LOGGER.info("API server listening on http://%s:%s", host, port)
+    LOGGER.debug(
+        "Endpoints: GET /health, POST /monitors, GET /monitors, GET /monitors/device/{device_id}, "
+        "GET /sent-prompts/device/{device_id}, DELETE /monitors/device/{device_id}, "
+        "POST /monitors/allow-prompt/{device_id}, POST /monitors/manual/{device_id}"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down API server...")
+        LOGGER.info("Shutting down API server")
     finally:
         server.server_close()
 

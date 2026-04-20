@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import requests
 
+from log_utils import get_logger
+
 
 def _load_env_file():
     env_path = Path(__file__).resolve().parent / ".env"
@@ -23,6 +25,7 @@ _load_env_file()
 
 baseUrl: str = os.environ.get("XIAOZHI_BASE_URL", "http://127.0.0.1:8002/xiaozhi")
 serverSecret: str = os.environ.get("XIAOZHI_SERVER_SECRET", "")
+LOGGER = get_logger(__name__)
 
 
 def _build_headers() -> Dict[str, str]:
@@ -68,14 +71,20 @@ def sendPrompt(deviceId: str, prompt: str):
     response = requests.post(url, headers=headers, json=data)
     if response.status_code == 200:
         response_json = response.json()
-        print(f"Prompt send response. deviceId={deviceId} prompt={safe_prompt} response={response_json}")
+        LOGGER.debug("Prompt sent. deviceId=%s prompt=%s response=%s", deviceId, safe_prompt, response_json)
         return {
             "ok": response_json.get("code") == 0,
             "status_code": response.status_code,
             "data": response_json,
         }
     else:
-        print(f"Failed to send prompt. deviceId={deviceId} prompt={safe_prompt} status_code={response.status_code}, response={response.text}")
+        LOGGER.error(
+            "Failed to send prompt. deviceId=%s prompt=%s status_code=%s response=%s",
+            deviceId,
+            safe_prompt,
+            response.status_code,
+            response.text,
+        )
         return {
             "ok": False,
             "status_code": response.status_code,
@@ -87,14 +96,19 @@ def getDeviceOnlineStatus(deviceId: str):
     headers = _build_headers()
     response = requests.get(url, headers=headers)
     if response.status_code == 200:
-        print(f"Device online status retrieved successfully. Response: {response.json()}")
+        LOGGER.debug("Device online status retrieved. deviceId=%s response=%s", deviceId, response.json())
         return {
             "ok": True,
             "status_code": response.status_code,
             "data": response.json(),
         }
     else:
-        print(f"Failed to retrieve device online status. Status code: {response.status_code}, Response: {response.text}")
+        LOGGER.error(
+            "Failed to retrieve device online status. deviceId=%s status_code=%s response=%s",
+            deviceId,
+            response.status_code,
+            response.text,
+        )
         return {
             "ok": False,
             "status_code": response.status_code,
@@ -104,18 +118,23 @@ def getDeviceOnlineStatus(deviceId: str):
 def getDeviceOwnerBenefit(deviceId: str):
     url = f"{baseUrl}/activation-code/device/{deviceId}/benefits"
     headers = _build_headers()
-    print(f"Attempting to retrieve device owner benefit for deviceId: {deviceId} from URL: {url}")
+    LOGGER.debug("Retrieving device owner benefit. deviceId=%s url=%s", deviceId, url)
     response = requests.get(url, headers=headers)
     if response.status_code == 200:
         response_json = response.json()
-        print(f"Device owner benefit retrieved successfully. Response: {response_json}")
+        LOGGER.debug("Device owner benefit retrieved. deviceId=%s response=%s", deviceId, response_json)
         return {
             "ok": response_json.get("code") == 0,
             "status_code": response.status_code,
             "data": response_json,
         }
     else:
-        print(f"Failed to retrieve device owner benefit. Status code: {response.status_code}, Response: {response.text}")
+        LOGGER.error(
+            "Failed to retrieve device owner benefit. deviceId=%s status_code=%s response=%s",
+            deviceId,
+            response.status_code,
+            response.text,
+        )
         return {
             "ok": False,
             "status_code": response.status_code,
@@ -129,13 +148,18 @@ def getDeviceOwner(deviceId: str):
     response = requests.get(url, headers=headers)
     if response.status_code == 200:
         response_json = response.json()
-        print(f"Device owner retrieved successfully. Response: {response_json}")
+        LOGGER.debug("Device owner retrieved. deviceId=%s response=%s", deviceId, response_json)
         return {
             "ok": response_json.get("code") == 0,
             "status_code": response.status_code,
             "data": response_json,
         }
-    print(f"Failed to retrieve device owner. Status code: {response.status_code}, Response: {response.text}")
+    LOGGER.error(
+        "Failed to retrieve device owner. deviceId=%s status_code=%s response=%s",
+        deviceId,
+        response.status_code,
+        response.text,
+    )
     return {
         "ok": False,
         "status_code": response.status_code,
@@ -152,14 +176,20 @@ def consumeDeviceOwnerBalance(deviceId: str, amount: int):
     response = requests.post(url, headers=headers, json=data)
     if response.status_code == 200:
         response_json = response.json()
-        print(f"Device owner balance consumed successfully. Response: {response_json}")
+        LOGGER.debug("Device owner balance consumed. deviceId=%s amount=%s response=%s", deviceId, amount, response_json)
         return {
             "ok": response_json.get("code") == 0,
             "status_code": response.status_code,
             "data": response_json,
         }
     else:
-        print(f"Failed to consume device owner balance. Status code: {response.status_code}, Response: {response.text}")
+        LOGGER.error(
+            "Failed to consume device owner balance. deviceId=%s amount=%s status_code=%s response=%s",
+            deviceId,
+            amount,
+            response.status_code,
+            response.text,
+        )
         return {
             "ok": False,
             "status_code": response.status_code,
