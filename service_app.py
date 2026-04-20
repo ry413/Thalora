@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from typing import Any, Dict, Optional
 
-from api import consumeDeviceOwnerBalance, getDeviceOnlineStatus, getDeviceOwnerBenefit, getDeviceOwnerId
+from api import consumeDeviceOwnerBalance, getDeviceOnlineStatus, getDeviceOwnerBenefit, getDeviceOwner
 from liveMan import DouyinLiveWebFetcher
 
 
@@ -54,6 +54,7 @@ class MonitorTask:
     device_offline_since: Optional[str] = None
     room_ended_since: Optional[str] = None
     benefit_user_id: Optional[str] = None
+    benefit_user_name: Optional[str] = None
     benefit_balance_seconds: Optional[int] = None
     benefit_membership_active: Optional[bool] = None
     benefit_membership_start_at: Optional[str] = None
@@ -119,6 +120,7 @@ class MonitorTask:
             "room_ended_since": self.room_ended_since,
             "room_ended_duration_seconds": room_ended_duration_seconds,
             "benefit_user_id": self.benefit_user_id,
+            "benefit_user_name": self.benefit_user_name,
             "benefit_balance_seconds": self.benefit_balance_seconds,
             "benefit_membership_active": self.benefit_membership_active,
             "benefit_membership_start_at": self.benefit_membership_start_at,
@@ -195,17 +197,24 @@ class MonitorManager:
                 return f"code={code}, msg={msg}"
         return str(response)
 
-    def _extract_owner_user_id(self, response: Dict[str, Any]) -> Optional[str]:
+    def _extract_owner_user(self, response: Dict[str, Any]) -> Dict[str, Optional[str]]:
+        result = {
+            "id": None,
+            "username": None,
+        }
         if not response or not response.get("ok"):
-            return None
+            return result
         payload = response.get("data", {})
         data = payload.get("data")
         if isinstance(data, dict):
             user_id = data.get("userId") or data.get("ownerUserId") or data.get("id")
-            return str(user_id).strip() if user_id else None
+            username = data.get("username") or data.get("userName") or data.get("name")
+            result["id"] = str(user_id).strip() if user_id else None
+            result["username"] = str(username).strip() if username else None
+            return result
         if isinstance(data, str):
-            return data.strip() or None
-        return None
+            result["id"] = data.strip() or None
+        return result
 
     def _find_active_task_by_user_id_unlocked(self, user_id: str) -> Optional[MonitorTask]:
         for task in self._tasks.values():
@@ -424,11 +433,17 @@ class MonitorManager:
         device_id: str,
         config_json: Optional[Dict[str, Any]] = None,
     ) -> MonitorTask:
-        initial_owner_user_id = None
+        initial_owner = {
+            "id": None,
+            "username": None,
+        }
         try:
-            initial_owner_user_id = self._extract_owner_user_id(getDeviceOwnerId(device_id))
+            initial_owner = self._extract_owner_user(getDeviceOwner(device_id))
         except Exception:
-            initial_owner_user_id = None
+            initial_owner = {
+                "id": None,
+                "username": None,
+            }
 
         benefit_response = None
         try:
@@ -438,7 +453,7 @@ class MonitorManager:
             raise ValueError(f"failed to get device owner benefit: {err}") from err
         if not initial_benefit:
             raise ValueError(f"failed to get device owner benefit: {self._summarize_api_error(benefit_response)}")
-        owner_user_id = initial_owner_user_id or str(initial_benefit.get("userId") or "").strip()
+        owner_user_id = initial_owner.get("id") or str(initial_benefit.get("userId") or "").strip()
         if not owner_user_id:
             raise ValueError("failed to get device owner id")
         if not bool(initial_benefit.get("membershipActive")) and int(initial_benefit.get("balanceSeconds") or 0) <= 0:
@@ -464,6 +479,7 @@ class MonitorManager:
         task.membership_last_checked_at = utc_now_iso()
         self._apply_benefit_payload_unlocked(task, initial_benefit)
         task.benefit_user_id = owner_user_id
+        task.benefit_user_name = initial_owner.get("username")
         fetcher = DouyinLiveWebFetcher(
             live_id=live_id,
             device_id=device_id,

@@ -123,19 +123,19 @@ def getDeviceOwnerBenefit(deviceId: str):
         }
 
 
-def getDeviceOwnerId(deviceId: str):
-    url = f"{baseUrl}/device/user/{deviceId}"
+def getDeviceOwner(deviceId: str):
+    url = f"{baseUrl}/device/owner/{deviceId}"
     headers = _build_headers()
     response = requests.get(url, headers=headers)
     if response.status_code == 200:
         response_json = response.json()
-        print(f"Device owner id retrieved successfully. Response: {response_json}")
+        print(f"Device owner retrieved successfully. Response: {response_json}")
         return {
             "ok": response_json.get("code") == 0,
             "status_code": response.status_code,
             "data": response_json,
         }
-    print(f"Failed to retrieve device owner id. Status code: {response.status_code}, Response: {response.text}")
+    print(f"Failed to retrieve device owner. Status code: {response.status_code}, Response: {response.text}")
     return {
         "ok": False,
         "status_code": response.status_code,
