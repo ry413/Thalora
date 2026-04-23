@@ -457,11 +457,17 @@ class DouyinLiveWebFetcher:
                     "prompt": prompt,
                     "response": result,
                 })
+                return result
+            LOGGER.error(
+                "Prompt dispatch failed. device_id=%s prompt=%s result=%s",
+                self.device_id,
+                prompt,
+                result,
+            )
+            return result or {"ok": False, "msg": "empty sendPrompt result"}
         except Exception as err:
             LOGGER.error("sendPrompt error. device_id=%s error=%s", self.device_id, err)
-            with self._prompt_lock:
-                self._can_send_prompt = True
-            self._try_dispatch_prompt()
+            return {"ok": False, "msg": str(err)}
 
     def _source_queue_limit(self, source):
         if source in {"timed", "awkward"}:
@@ -496,7 +502,7 @@ class DouyinLiveWebFetcher:
             source_queue = self._pending_prompts_by_source.get(next_source)
             if not source_queue:
                 return None
-            return source_queue.popleft()["prompt"]
+            return source_queue.popleft()
 
         # 合并弹幕
         # danmu_batch_count = 3
@@ -506,20 +512,36 @@ class DouyinLiveWebFetcher:
             return None
         danmu_prompts = []
         while source_queue and len(danmu_prompts) < danmu_batch_count:
-            danmu_prompts.append(source_queue.popleft()["prompt"])
+            item = source_queue.popleft()
+            danmu_prompts.append(item["prompt"])
         if not danmu_prompts:
             return None
-        return " | ".join(danmu_prompts)
+        return {
+            "source": "danmu",
+            "prompt": " | ".join(danmu_prompts),
+            "ts": time.time(),
+        }
 
     def _try_dispatch_prompt(self):
         with self._prompt_lock:
             if not self._can_send_prompt:
-                return
-            prompt = self._build_next_prompt_unlocked()
-            if not prompt:
-                return
+                return {"ok": False, "msg": "prompt sending is locked"}
+            prompt_item = self._build_next_prompt_unlocked()
+            if not prompt_item:
+                return {"ok": True, "msg": "no pending prompt"}
             self._can_send_prompt = False
-        self._dispatch_prompt(prompt)
+        result = self._dispatch_prompt(prompt_item["prompt"])
+        if result and result.get("ok"):
+            return result
+
+        with self._prompt_lock:
+            source_queue = self._pending_prompts_by_source.get(prompt_item["source"])
+            if source_queue is None:
+                source_queue = self._get_or_create_source_queue_unlocked(prompt_item["source"])
+            if source_queue is not None:
+                source_queue.appendleft(prompt_item)
+            self._can_send_prompt = True
+        return result or {"ok": False, "msg": "prompt dispatch failed"}
 
     def enqueue_prompt(self, prompt, source="danmu"):
         if not prompt:
@@ -554,7 +576,7 @@ class DouyinLiveWebFetcher:
     def allow_send_prompt(self):
         with self._prompt_lock:
             self._can_send_prompt = True
-        self._try_dispatch_prompt()
+        return self._try_dispatch_prompt()
 
     def get_prompt_state(self):
         with self._prompt_lock:

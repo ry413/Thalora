@@ -570,14 +570,15 @@ class MonitorManager:
                 return task
         return None
 
-    def allow_prompt_by_device(self, device_id: str) -> Optional[MonitorTask]:
+    def allow_prompt_by_device(self, device_id: str):
         task = self.get_active_monitor_by_device(device_id)
         if not task:
-            return None
+            return None, None
+        result = None
         fetcher = task.fetcher
         if fetcher and hasattr(fetcher, "allow_send_prompt"):
-            fetcher.allow_send_prompt()
-        return task
+            result = fetcher.allow_send_prompt()
+        return task, result
 
     def enqueue_manual_prompt_by_device(self, device_id: str, message: str) -> Optional[MonitorTask]:
         task = self.get_active_monitor_by_device(device_id)
@@ -735,14 +736,24 @@ class ServiceHandler(BaseHTTPRequestHandler):
             if not device_id:
                 self._send_json({"code": 400, "msg": "invalid device id"})
                 return
-            task = MANAGER.allow_prompt_by_device(device_id)
+            task, allow_result = MANAGER.allow_prompt_by_device(device_id)
             if not task:
                 self._send_json({"code": 404, "msg": "no active monitor for this device_id"})
+                return
+            if allow_result and not allow_result.get("ok"):
+                self._send_json({
+                    "code": 502,
+                    "msg": "prompt dispatch failed",
+                    "device_id": device_id,
+                    "send_result": allow_result,
+                    "data": task.to_dict(),
+                }, status_code=502)
                 return
             self._send_json({
                 "code": 0,
                 "msg": "prompt unlocked",
                 "device_id": device_id,
+                "send_result": allow_result,
                 "data": task.to_dict(),
             })
             return
