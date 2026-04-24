@@ -43,7 +43,7 @@ def _sanitize_prompt_text(prompt: str) -> str:
         prompt = str(prompt)
     prompt = prompt.replace("\r", " ").replace("\n", " ").replace("\t", " ")
     prompt = re.sub(r"[\x00-\x1f\x7f]", " ", prompt)
-    prompt = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff，。！？：；、【】 ]+", " ", prompt)
+    prompt = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff，。！？：；、【】@ ]+", " ", prompt)
     prompt = re.sub(r"\s+", " ", prompt).strip()
     if not prompt:
         prompt = "请简短回复"

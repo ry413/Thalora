@@ -751,9 +751,8 @@ class DouyinLiveWebFetcher:
         try:
             payload = resp.json()
         except (ValueError, json.JSONDecodeError) as err:
-            self._update_room_status("ended")
             LOGGER.info(
-                "Treating room as ended after invalid room status response. live_id=%s status_code=%s error=%s",
+                "Keeping existing room status after invalid room status response. live_id=%s status_code=%s error=%s",
                 self.live_id,
                 resp.status_code,
                 err,
@@ -761,9 +760,8 @@ class DouyinLiveWebFetcher:
             raise
         data = payload.get('data')
         if not data:
-            self._update_room_status("ended")
             LOGGER.info(
-                "Treating room as ended after empty room status response. live_id=%s status_code=%s payload=%s",
+                "Keeping existing room status after empty room status response. live_id=%s status_code=%s payload=%s",
                 self.live_id,
                 resp.status_code,
                 payload,
@@ -851,6 +849,7 @@ class DouyinLiveWebFetcher:
         """
         连接建立成功
         """
+        self._update_room_status("running")
         LOGGER.debug("WebSocket connected. live_id=%s", self.live_id)
         threading.Thread(target=self._sendHeartbeat, daemon=True).start()
         self._start_background_tasks()
@@ -948,7 +947,7 @@ class DouyinLiveWebFetcher:
         prompt = self._build_prompt_from_templates(
             "danmu",
             variables=variables,
-            fallback=f"【弹幕】{user_name}: {content}",
+            fallback=f"【弹幕】{user_name}：{content}",
         )
         self.enqueue_prompt(prompt, source="danmu")
         
