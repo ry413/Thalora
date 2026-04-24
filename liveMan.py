@@ -11,6 +11,7 @@ from collections import deque
 from datetime import datetime
 import gzip
 import hashlib
+import json
 import random
 import re
 import string
@@ -713,6 +714,13 @@ class DouyinLiveWebFetcher:
         ctx = execute_js(self.abogus_file)
         _a_bogus = ctx.call("get_ab", url, self.user_agent)
         return _a_bogus
+
+    def _update_room_status(self, room_status, updated_at=None):
+        if updated_at is None:
+            updated_at = datetime.now().astimezone().isoformat()
+        with self._live_state_lock:
+            self._room_status = room_status
+            self._room_stats_updated_at = updated_at
     
     def get_room_status(self):
         """
@@ -740,14 +748,33 @@ class DouyinLiveWebFetcher:
             'Cookie': f'ttwid={self.ttwid};__ac_nonce={nonce}; __ac_signature={signature}',
         })
         resp = self.session.get(url, headers=headers)
-        data = resp.json().get('data')
+        try:
+            payload = resp.json()
+        except (ValueError, json.JSONDecodeError) as err:
+            self._update_room_status("ended")
+            LOGGER.info(
+                "Treating room as ended after invalid room status response. live_id=%s status_code=%s error=%s",
+                self.live_id,
+                resp.status_code,
+                err,
+            )
+            raise
+        data = payload.get('data')
+        if not data:
+            self._update_room_status("ended")
+            LOGGER.info(
+                "Treating room as ended after empty room status response. live_id=%s status_code=%s payload=%s",
+                self.live_id,
+                resp.status_code,
+                payload,
+            )
+            return
         if data:
             room_status = data.get('room_status')
             user = data.get('user')
             user_id = user.get('id_str')
             nickname = user.get('nickname')
-            with self._live_state_lock:
-                self._room_status = "ended" if bool(room_status) else "running"
+            self._update_room_status("ended" if bool(room_status) else "running")
             LOGGER.debug(
                 "Room status updated. live_id=%s nickname=%s user_id=%s status=%s",
                 self.live_id,
