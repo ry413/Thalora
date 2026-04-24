@@ -205,6 +205,8 @@ class DouyinLiveWebFetcher:
         self._prompt_lock = threading.Lock()
         self._can_send_prompt = True
         self._pending_prompts_by_source = {}
+        self._expected_ws_close = False
+        self._stop_reason = None
     
     def start(self):
         self._stop_event.clear()
@@ -216,11 +218,17 @@ class DouyinLiveWebFetcher:
         self._connectWebSocket()
 
     
-    def stop(self):
+    def stop(self, reason="manual"):
         self._stop_event.set()
+        self._expected_ws_close = True
+        self._stop_reason = reason
+        LOGGER.info("Stopping fetcher. live_id=%s device_id=%s reason=%s", self.live_id, self.device_id, reason)
         ws = getattr(self, "ws", None)
         if ws:
             ws.close()
+
+    def _is_expected_shutdown(self) -> bool:
+        return self._stop_event.is_set() or self._expected_ws_close
 
     def _normalize_schedule_config(self, raw_config, default_config):
         cfg = {
@@ -784,7 +792,7 @@ class DouyinLiveWebFetcher:
         try:
             self.ws.run_forever()
         except Exception:
-            self.stop()
+            self.stop(reason="run_forever_exception")
             raise
     
     def _sendHeartbeat(self):
@@ -793,11 +801,21 @@ class DouyinLiveWebFetcher:
         """
         while True:
             try:
+                if self._stop_event.is_set():
+                    break
                 heartbeat = PushFrame(payload_type='hb').SerializeToString()
                 self.ws.send(heartbeat, websocket.ABNF.OPCODE_PING)
                 LOGGER.debug("Heartbeat sent. live_id=%s", self.live_id)
             except Exception as e:
-                LOGGER.error("Heartbeat error. live_id=%s error=%s", self.live_id, e)
+                if self._is_expected_shutdown():
+                    LOGGER.debug(
+                        "Heartbeat stopped after expected close. live_id=%s reason=%s error=%s",
+                        self.live_id,
+                        self._stop_reason,
+                        e,
+                    )
+                else:
+                    LOGGER.error("Heartbeat error. live_id=%s error=%s", self.live_id, e)
                 break
             else:
                 time.sleep(5)
@@ -854,11 +872,23 @@ class DouyinLiveWebFetcher:
                 pass
     
     def _wsOnError(self, ws, error):
+        if self._is_expected_shutdown():
+            LOGGER.debug(
+                "WebSocket closed during expected shutdown. live_id=%s reason=%s error=%s",
+                self.live_id,
+                self._stop_reason,
+                error,
+            )
+            return
         LOGGER.error("WebSocket error. live_id=%s error=%s", self.live_id, error)
     
     def _wsOnClose(self, ws, *args):
-        self.get_room_status()
-        LOGGER.debug("WebSocket closed. live_id=%s", self.live_id)
+        if not self._is_expected_shutdown():
+            try:
+                self.get_room_status()
+            except Exception as err:
+                LOGGER.debug("Failed to refresh room status on close. live_id=%s error=%s", self.live_id, err)
+        LOGGER.debug("WebSocket closed. live_id=%s reason=%s", self.live_id, self._stop_reason)
     
     def _parseChatMsg(self, payload):
         """聊天消息"""
@@ -1028,7 +1058,7 @@ class DouyinLiveWebFetcher:
             with self._live_state_lock:
                 self._room_status = "ended"
             LOGGER.info("Room ended. live_id=%s", self.live_id)
-            self.stop()
+            self.stop(reason="room_ended")
     
     def _parseRoomStreamAdaptationMsg(self, payload):
         message = RoomStreamAdaptationMessage().parse(payload)

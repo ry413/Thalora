@@ -61,6 +61,9 @@ class MonitorTask:
     benefit_membership_active: Optional[bool] = None
     benefit_membership_start_at: Optional[str] = None
     benefit_membership_end_at: Optional[str] = None
+    membership_daily_limit_seconds: Optional[int] = None
+    membership_daily_consumed_seconds: Optional[int] = None
+    membership_daily_remaining_seconds: Optional[int] = None
     benefit_checked_at: Optional[str] = None
     membership_last_checked_at: Optional[str] = None
     membership_expired_since: Optional[str] = None
@@ -127,6 +130,9 @@ class MonitorTask:
             "benefit_membership_active": self.benefit_membership_active,
             "benefit_membership_start_at": self.benefit_membership_start_at,
             "benefit_membership_end_at": self.benefit_membership_end_at,
+            "membership_daily_limit_seconds": self.membership_daily_limit_seconds,
+            "membership_daily_consumed_seconds": self.membership_daily_consumed_seconds,
+            "membership_daily_remaining_seconds": self.membership_daily_remaining_seconds,
             "benefit_checked_at": self.benefit_checked_at,
             "membership_last_checked_at": self.membership_last_checked_at,
             "membership_expired_since": self.membership_expired_since,
@@ -159,6 +165,22 @@ class MonitorManager:
         task.updated_at = utc_now_iso()
         if error is not None:
             task.error = error
+
+    def _prepare_task_runtime_unlocked(self, task: MonitorTask):
+        fetcher = DouyinLiveWebFetcher(
+            live_id=task.live_id,
+            device_id=task.device_id,
+            config_json=task.config_json,
+            sent_prompt_callback=lambda payload: self.record_sent_prompt(task.device_id, payload),
+        )
+        thread = threading.Thread(target=self._run_fetcher, args=(task.device_id,), daemon=True)
+        task.fetcher = fetcher
+        task.thread = thread
+        task.started_at = None
+        task.stopped_at = None
+        task.error = None
+        self._set_status_unlocked(task, "starting")
+        return thread
 
     def _extract_device_exists(self, response: Dict[str, Any]) -> Optional[bool]:
         if not response or not response.get("ok"):
@@ -233,10 +255,21 @@ class MonitorManager:
         task.benefit_membership_active = bool(benefit_payload.get("membershipActive"))
         task.benefit_membership_start_at = benefit_payload.get("membershipStartAt")
         task.benefit_membership_end_at = benefit_payload.get("membershipEndAt")
+        daily_limit_seconds = benefit_payload.get("membershipDailyLimitSeconds")
+        daily_consumed_seconds = benefit_payload.get("membershipDailyConsumedSeconds")
+        daily_remaining_seconds = benefit_payload.get("membershipDailyRemainingSeconds")
+        task.membership_daily_limit_seconds = int(daily_limit_seconds) if daily_limit_seconds is not None else None
+        task.membership_daily_consumed_seconds = int(daily_consumed_seconds) if daily_consumed_seconds is not None else None
+        task.membership_daily_remaining_seconds = int(daily_remaining_seconds) if daily_remaining_seconds is not None else None
         task.benefit_checked_at = utc_now_iso()
         task.updated_at = utc_now_iso()
         if task.benefit_membership_active:
             task.membership_expired_since = None
+
+    def _task_has_available_benefit_unlocked(self, task: MonitorTask) -> bool:
+        if task.benefit_membership_active:
+            return (task.membership_daily_remaining_seconds or 0) > 0
+        return (task.benefit_balance_seconds or 0) > 0
 
     def _refresh_monitor_benefit(self, device_id: str, now_dt: Optional[datetime] = None) -> bool:
         if now_dt is None:
@@ -256,17 +289,8 @@ class MonitorManager:
                 last_checked_dt = parse_iso_datetime(current.membership_last_checked_at)
                 if membership_end_dt and now_dt >= membership_end_dt:
                     need_remote_benefit_check = True
-                elif current.membership_expired_since is not None:
-                    if last_checked_dt is None or (now_dt - last_checked_dt) >= self._membership_check_interval:
-                        need_remote_benefit_check = True
-                    else:
-                        expired_since_dt = parse_iso_datetime(current.membership_expired_since)
-                        if expired_since_dt and (now_dt - expired_since_dt) >= self._cleanup_threshold:
-                            current.error = "membership expired"
-                            current.updated_at = utc_now_iso()
-                            return False
-                else:
-                    return True
+                elif last_checked_dt is None or (now_dt - last_checked_dt) >= self._membership_check_interval:
+                    need_remote_benefit_check = True
 
         if need_remote_benefit_check:
             benefit_payload = None
@@ -285,19 +309,17 @@ class MonitorManager:
                     self._apply_benefit_payload_unlocked(current, benefit_payload)
                     if current.benefit_membership_active:
                         current.membership_expired_since = None
-                        current.last_billed_at = utc_now_iso()
-                        return True
-
-                if current.membership_expired_since is None:
+                    elif current.membership_expired_since is None:
+                        current.membership_expired_since = utc_now_iso()
+                        current.updated_at = utc_now_iso()
+                elif current.membership_expired_since is None:
                     current.membership_expired_since = utc_now_iso()
                     current.updated_at = utc_now_iso()
 
-                expired_since_dt = parse_iso_datetime(current.membership_expired_since)
-                if expired_since_dt and (now_dt - expired_since_dt) >= self._cleanup_threshold:
-                    current.error = "membership expired"
+                if not self._task_has_available_benefit_unlocked(current):
+                    current.error = "device owner benefit insufficient"
                     current.updated_at = utc_now_iso()
                     return False
-                return True
 
         with self._lock:
             current = self._tasks.get(device_id)
@@ -306,7 +328,7 @@ class MonitorManager:
 
             if current.last_billed_at is None:
                 current.last_billed_at = utc_now_iso()
-                if (current.benefit_balance_seconds or 0) <= 0:
+                if not self._task_has_available_benefit_unlocked(current):
                     current.error = "device owner benefit insufficient"
                     current.updated_at = utc_now_iso()
                     return False
@@ -323,24 +345,44 @@ class MonitorManager:
 
         consume_result = None
         try:
+            LOGGER.info("Consuming device owner benefit. device_id=%s seconds=%s", device_id, consume_seconds)
             consume_result = consumeDeviceOwnerBalance(device_id, consume_seconds)
-        except Exception:
+        except Exception as err:
+            LOGGER.error("Benefit consume request raised exception. device_id=%s seconds=%s error=%s", device_id, consume_seconds, err)
             consume_result = None
 
         with self._lock:
             current = self._tasks.get(device_id)
             if not current:
                 return False
+            if not self._task_has_available_benefit_unlocked(current):
+                current.error = "device owner benefit insufficient"
+                current.updated_at = utc_now_iso()
+                return False
 
             if consume_result and consume_result.get("ok"):
                 current.last_billed_at = utc_now_iso()
                 current.billed_seconds_total += consume_seconds
-                if current.benefit_balance_seconds is not None:
+                consume_payload = self._extract_benefit_payload(consume_result)
+                if consume_payload is not None:
+                    self._apply_benefit_payload_unlocked(current, consume_payload)
+                elif current.benefit_membership_active:
+                    if current.membership_daily_consumed_seconds is not None:
+                        current.membership_daily_consumed_seconds += consume_seconds
+                    if current.membership_daily_remaining_seconds is not None:
+                        current.membership_daily_remaining_seconds = max(0, current.membership_daily_remaining_seconds - consume_seconds)
+                elif current.benefit_balance_seconds is not None:
                     current.benefit_balance_seconds = max(0, current.benefit_balance_seconds - consume_seconds)
                 current.updated_at = utc_now_iso()
                 return True
 
-            current.error = "device owner balance insufficient"
+            LOGGER.error(
+                "Benefit consume failed. device_id=%s seconds=%s result=%s",
+                device_id,
+                consume_seconds,
+                consume_result,
+            )
+            current.error = "device owner benefit insufficient"
             current.updated_at = utc_now_iso()
             return False
 
@@ -357,11 +399,39 @@ class MonitorManager:
             self._run_watchdog_once()
             time.sleep(self._watchdog_interval_seconds)
 
+    def _restart_monitor_if_recovered(self, device_id: str) -> bool:
+        thread = None
+        with self._lock:
+            current = self._tasks.get(device_id)
+            if not current:
+                return False
+            if current.status != "stopped":
+                return False
+            if current.device_online is not True:
+                return False
+            fetcher = current.fetcher
+            live_state = {}
+            if fetcher and hasattr(fetcher, "get_live_state"):
+                try:
+                    live_state = fetcher.get_live_state()
+                except Exception:
+                    live_state = {}
+            if live_state.get("room_status") != "running":
+                return False
+            thread = self._prepare_task_runtime_unlocked(current)
+
+        if thread:
+            LOGGER.info("Restarting recovered monitor. device_id=%s live_id=%s", current.device_id, current.live_id)
+            thread.start()
+            return True
+        return False
+
     def _refresh_monitor_health(self, device_id: str, now_dt: Optional[datetime] = None) -> bool:
         if now_dt is None:
             now_dt = datetime.now(UTC_PLUS_8)
 
-        task = self.get_active_monitor_by_device(device_id)
+        with self._lock:
+            task = self._tasks.get(device_id)
         if not task:
             return False
 
@@ -373,6 +443,12 @@ class MonitorManager:
 
         live_state = {}
         fetcher = task.fetcher
+        should_refresh_room_status = task.status in {"stopped", "error"} or task.room_ended_since is not None
+        if should_refresh_room_status and fetcher and hasattr(fetcher, "get_room_status"):
+            try:
+                fetcher.get_room_status()
+            except Exception:
+                pass
         if fetcher and hasattr(fetcher, "get_live_state"):
             try:
                 live_state = fetcher.get_live_state()
@@ -412,8 +488,17 @@ class MonitorManager:
                 should_delete = True
 
         if should_delete:
+            LOGGER.info(
+                "Deleting monitor after inactivity threshold. device_id=%s live_id=%s device_offline_since=%s room_ended_since=%s",
+                current.device_id,
+                current.live_id,
+                current.device_offline_since,
+                current.room_ended_since,
+            )
             self.delete_monitor(device_id)
             return False
+
+        self._restart_monitor_if_recovered(device_id)
         return True
 
     def _run_watchdog_once(self):
@@ -458,7 +543,11 @@ class MonitorManager:
         owner_user_id = initial_owner.get("id") or str(initial_benefit.get("userId") or "").strip()
         if not owner_user_id:
             raise ValueError("failed to get device owner id")
-        if not bool(initial_benefit.get("membershipActive")) and int(initial_benefit.get("balanceSeconds") or 0) <= 0:
+        has_initial_benefit = (
+            (bool(initial_benefit.get("membershipActive")) and int(initial_benefit.get("membershipDailyRemainingSeconds") or 0) > 0)
+            or (not bool(initial_benefit.get("membershipActive")) and int(initial_benefit.get("balanceSeconds") or 0) > 0)
+        )
+        if not has_initial_benefit:
             raise ValueError("device owner benefit insufficient")
 
         with self._lock:
@@ -482,15 +571,7 @@ class MonitorManager:
         self._apply_benefit_payload_unlocked(task, initial_benefit)
         task.benefit_user_id = owner_user_id
         task.benefit_user_name = initial_owner.get("username")
-        fetcher = DouyinLiveWebFetcher(
-            live_id=live_id,
-            device_id=device_id,
-            config_json=config_json,
-            sent_prompt_callback=lambda payload: self.record_sent_prompt(device_id, payload),
-        )
-        thread = threading.Thread(target=self._run_fetcher, args=(device_id,), daemon=True)
-        task.fetcher = fetcher
-        task.thread = thread
+        thread = self._prepare_task_runtime_unlocked(task)
         with self._lock:
             self._tasks[device_id] = task
         thread.start()
@@ -533,7 +614,7 @@ class MonitorManager:
 
         if fetcher:
             try:
-                fetcher.stop()
+                fetcher.stop(reason="monitor_stop")
             except Exception as err:
                 with self._lock:
                     task = self._tasks.get(device_id)
@@ -553,6 +634,7 @@ class MonitorManager:
             return task
 
     def delete_monitor(self, device_id: str) -> Optional[MonitorTask]:
+        LOGGER.info("Deleting monitor. device_id=%s", device_id)
         task = self.stop_monitor(device_id)
         if not task:
             return None

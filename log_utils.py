@@ -3,8 +3,8 @@ import os
 
 
 def _resolve_log_level() -> int:
-    level_name = os.environ.get("DOUYIN_LOG_LEVEL", "ERROR").strip().upper()
-    return getattr(logging, level_name, logging.ERROR)
+    level_name = os.environ.get("DOUYIN_LOG_LEVEL", "INFO").strip().upper()
+    return getattr(logging, level_name, logging.INFO)
 
 
 def get_logger(name: str) -> logging.Logger:

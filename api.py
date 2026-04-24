@@ -173,7 +173,8 @@ def getDeviceOwner(deviceId: str):
     }
     
 def consumeDeviceOwnerBalance(deviceId: str, amount: int):
-    url = f"{baseUrl}/activation-code/device/{deviceId}/balance/consume"
+    url = f"{baseUrl}/activation-code/device/{deviceId}/benefit/consume"
+
     headers = _build_headers()
     data = {
         "seconds": amount,
@@ -182,7 +183,8 @@ def consumeDeviceOwnerBalance(deviceId: str, amount: int):
     response = requests.post(url, headers=headers, json=data, timeout=requestTimeoutSeconds)
     if response.status_code == 200:
         response_json = response.json()
-        LOGGER.debug("Device owner balance consumed. deviceId=%s amount=%s response=%s", deviceId, amount, response_json)
+        if response_json.get("code") != 0:
+            LOGGER.error("Benefit consume rejected. deviceId=%s amount=%s response=%s", deviceId, amount, response_json)
         return {
             "ok": response_json.get("code") == 0,
             "status_code": response.status_code,
